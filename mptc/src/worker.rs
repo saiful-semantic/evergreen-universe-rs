@@ -15,12 +15,20 @@ pub enum WorkerState {
     Done,
 }
 
+/// # Examples
+///
+/// ```
+/// use mptc::worker::WorkerState;
+///
+/// let state = WorkerState::Active;
+/// assert_eq!(state.to_string(), "Active");
+/// ```
 impl From<&WorkerState> for &'static str {
     fn from(e: &WorkerState) -> &'static str {
         match e {
-            &WorkerState::Idle => "Idle",
-            &WorkerState::Active => "Active",
-            &WorkerState::Done => "Done",
+            WorkerState::Idle => "Idle",
+            WorkerState::Active => "Active",
+            WorkerState::Done => "Done",
         }
     }
 }
@@ -134,7 +142,7 @@ impl Worker {
     fn set_state(&mut self, state: WorkerState) -> Result<(), String> {
         let evt = WorkerStateEvent {
             worker_id: self.worker_id,
-            state: state,
+            state,
         };
 
         if let Err(e) = self.to_parent_tx.send(evt) {
@@ -143,7 +151,7 @@ impl Worker {
             // time to shut down.
             self.sig_tracker.request_fast_shutdown();
 
-            return Err(format!("Error notifying parent of state change: {e}"));
+            Err(format!("Error notifying parent of state change: {e}"))
         } else {
             Ok(())
         }
@@ -162,7 +170,7 @@ impl Worker {
             return true;
         }
 
-        return false;
+        false
     }
 
     pub fn run(&mut self) {
@@ -249,7 +257,7 @@ impl Worker {
             log::error!("{self} error processing request: {e}");
         }
 
-        return Ok(true);
+        Ok(true)
     }
 }
 

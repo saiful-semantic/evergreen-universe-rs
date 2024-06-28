@@ -1,4 +1,3 @@
-use getopts;
 use sip2::*;
 use std::env;
 use std::sync::Arc;
@@ -40,6 +39,13 @@ Message Parameters:
     --patron-barcode <barcode>
     --patron-pass <password>
     --item-barcode <barcode>
+    --pay-amount <amount>
+
+    --fee-id <id>
+        Transaction ID within the ILS.
+
+    --transaction-id <id>
+        Transaction ID provided by the payer.
 
     --message-type <mtype> [Repeatable]
 
@@ -51,6 +57,7 @@ Message Parameters:
             * patron-information
             * checkout
             * checkin
+            * fee-paid
 "#;
 
 #[rustfmt::skip]
@@ -123,7 +130,7 @@ fn run_one_thread(
         for message in messages.iter() {
             let start = SystemTime::now();
 
-            let resp = match message.as_str() {
+            let mut resp = match message.as_str() {
                 "item-information" => client.item_info(&sip_params).expect("Item Info Requested"),
 
                 "patron-status" => client
@@ -138,8 +145,15 @@ fn run_one_thread(
 
                 "checkin" => client.checkin(&sip_params).expect("Checkin Requested"),
 
+                "fee-paid" => client.fee_paid(&sip_params).expect("Fee Paid Requested"),
+
                 _ => panic!("Unsupported message type: {}", message),
             };
+
+            // Sort the message fields for consistent output.
+            resp.msg_mut()
+                .fields_mut()
+                .sort_by(|a, b| a.code().cmp(b.code()));
 
             // Translate duration micros to millis w/ 3 decimal places.
             let duration = start.elapsed().unwrap().as_micros();
@@ -172,16 +186,17 @@ fn read_options() -> getopts::Matches {
     opts.optopt("", "repeat", "Repeat Count", "");
     opts.optopt("", "parallel", "Parallel Count", "");
 
+    opts.optopt("", "pay-amount", "Fee Paid Amount", "");
+    opts.optopt("", "transaction-id", "Fee Paid Transaction ID", "");
+    opts.optopt("", "fee-id", "Fee Paid Fee ID", "");
+
     opts.optflag("h", "help", "");
     opts.optflag("q", "quiet", "");
 
     opts.optmulti("", "message-type", "Message Type", "");
 
-    let matches = opts
-        .parse(&args[1..]) // skip the command name
-        .expect("Error parsing command line options");
-
-    matches
+    opts.parse(&args[1..]) // skip the command name
+        .expect("Error parsing command line options")
 }
 
 /// Create the SIP paramater set from the command line arguments.
@@ -220,6 +235,18 @@ fn setup_params(options: &getopts::Matches) -> ParamSet {
 
     if let Some(ref patron_pwd) = options.opt_str("patron-password") {
         params.set_patron_pwd(patron_pwd);
+    }
+
+    if let Some(ref amount) = options.opt_str("pay-amount") {
+        params.set_pay_amount(amount);
+    }
+
+    if let Some(ref id) = options.opt_str("fee-id") {
+        params.set_fee_id(id);
+    }
+
+    if let Some(ref id) = options.opt_str("transaction-id") {
+        params.set_transaction_id(id);
     }
 
     params

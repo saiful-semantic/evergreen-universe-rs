@@ -3,6 +3,7 @@ use super::session::Session;
 use eg::result::EgResult;
 use eg::EgValue;
 use evergreen as eg;
+use sip2::spec::PayType;
 
 pub struct PaymentResult {
     success: bool,
@@ -30,7 +31,7 @@ impl Session {
             }
         };
 
-        let mut result = PaymentResult::new(&patron_barcode);
+        let mut result = PaymentResult::new(patron_barcode);
 
         let pay_amount_str = match msg.get_field_value("BV") {
             Some(v) => v,
@@ -48,9 +49,12 @@ impl Session {
             }
         };
 
-        // credit card, cash, etc.
-        let pay_type = msg.fixed_fields()[2].value();
+        // msg.fixed_fields()[1] contains the FeeType code, but we do
+        // not support making payments toward transactions of specific
+        // types.  Payments are made toward specific transactions (by
+        // fee ID) or across all viable transaction types.
 
+        let pay_type: PayType = msg.fixed_fields()[2].value().try_into()?;
         let terminal_xact_op = msg.get_field_value("BK"); // optional
 
         // Envisionware extensions for relaying information about
@@ -58,11 +62,11 @@ impl Session {
         let register_login_op = msg.get_field_value("OR");
         let check_number_op = msg.get_field_value("RN");
 
-        let search = eg::hash! { barcode: patron_barcode };
-        let ops = eg::hash! { flesh: 1u8, flesh_fields: {ac: ["usr"]} };
+        let search = eg::hash! {"barcode": patron_barcode};
+        let ops = eg::hash! {"flesh": 1, "flesh_fields": {"ac": ["usr"]}};
         let mut cards = self.editor().search_with_ops("ac", search, ops)?;
 
-        if cards.len() == 0 {
+        if cards.is_empty() {
             return Ok(self.compile_payment_response(&result));
         }
 
@@ -75,6 +79,8 @@ impl Session {
         // Caller can request to pay toward a specific transaction or have
         // the back-end select transactions to pay.
         if let Some(xact_id_str) = msg.get_field_value("CG") {
+            log::info!("{self} applying payment to transaction {xact_id_str}");
+
             if let Ok(xact_id) = xact_id_str.parse::<i64>() {
                 payments = self.compile_one_xact(&user, xact_id, pay_amount, &mut result)?;
             } else {
@@ -86,7 +92,7 @@ impl Session {
             payments = self.compile_multi_xacts(&user, pay_amount, &mut result)?;
         }
 
-        if payments.len() == 0 {
+        if payments.is_empty() {
             return Ok(self.compile_payment_response(&result));
         }
 
@@ -161,13 +167,13 @@ impl Session {
         result: &mut PaymentResult,
     ) -> EgResult<Vec<(i64, f64)>> {
         let mut payments: Vec<(i64, f64)> = Vec::new();
-        let mut patron = Patron::new(&result.patron_barcode, self.format_user_name(&user));
+        let mut patron = Patron::new(&result.patron_barcode, self.format_user_name(user));
 
         patron.id = user.id()?;
 
         let xacts = self.get_patron_xacts(&patron, None)?; // see patron mod
 
-        if xacts.len() == 0 {
+        if xacts.is_empty() {
             result.screen_msg = Some("No transactions to pay".to_string());
             return Ok(payments);
         }
@@ -213,7 +219,8 @@ impl Session {
 
         if amount_remaining > 0.0 {
             result.screen_msg = Some("Overpayment not allowed".to_string());
-            return Ok(payments);
+            // An overpayment results in no payments at all.
+            return Ok(Vec::new());
         }
 
         Ok(payments)
@@ -224,7 +231,7 @@ impl Session {
         &mut self,
         user: &EgValue,
         result: &mut PaymentResult,
-        pay_type: &str,
+        pay_type: PayType,
         terminal_xact_op: Option<&str>,
         check_number_op: Option<&str>,
         register_login_op: Option<&str>,
@@ -233,11 +240,11 @@ impl Session {
         log::info!("{self} applying payments: {payments:?}");
 
         // Add the register login to the payment note if present.
-        let note = if let Some(rl) = register_login_op {
+        let mut note = if let Some(rl) = register_login_op {
             log::info!("{self} SIP sent register login string as {rl}");
 
             // Scrub the Windows domain if present ("DOMAIN\user")
-            let mut parts = rl.split("\\");
+            let mut parts = rl.split('\\');
             let p0 = parts.next();
 
             let login = if let Some(l) = parts.next() {
@@ -257,39 +264,48 @@ impl Session {
             pay_array.push(sub_array).ok();
         }
 
-        let mut args = eg::hash! {
-            userid: user.id()?,
-            note: note,
-            payments: pay_array,
-        };
+        let mut args = eg::hash! {"userid": user.id()?, "payments": pay_array};
 
         match pay_type {
-            "01" | "02" => {
-                // '01' is "VISA"; '02' is "credit card"
+            PayType::Visa | PayType::CreditCard => {
+                args["payment_type"] = EgValue::from("credit_card_payment");
 
-                args["cc_args"]["terminal_xact"] = match terminal_xact_op {
+                args["cc_args"]["approval_code"] = match terminal_xact_op {
                     Some(tx) => EgValue::from(tx),
                     None => EgValue::from("Not provided by SIP client"),
                 };
-
-                args["payment_type"] = EgValue::from("credit_card_payment");
             }
 
-            "05" => {
-                // Check payment
+            PayType::Check => {
                 args["payment_type"] = EgValue::from("check_payment");
+
                 args["check_number"] = match check_number_op {
                     Some(s) => EgValue::from(s),
                     None => EgValue::from("Not provided by SIP client"),
                 };
+
+                if let Some(id) = terminal_xact_op {
+                    note += " : ";
+                    note += id;
+                }
             }
-            _ => {
+            PayType::Cash => {
                 args["payment_type"] = EgValue::from("cash_payment");
+
+                // Unlike credit card payments, which have a dedicated
+                // external transaction ID field, cash/check payments
+                // do not. If we have such an ID, toss it into the note.
+                if let Some(id) = terminal_xact_op {
+                    note += " : ";
+                    note += id;
+                }
             }
         }
 
+        args["note"] = note.into();
+
         let authtoken = EgValue::from(self.editor().authtoken().unwrap());
-        let last_xact_id = user["last_xact_id"].as_str().unwrap(); // required
+        let last_xact_id = user["last_xact_id"].str()?;
 
         let resp = self.editor().client_mut().send_recv_one(
             "open-ils.circ",
@@ -297,7 +313,7 @@ impl Session {
             vec![authtoken, args, EgValue::from(last_xact_id)],
         )?;
 
-        let resp = resp.ok_or_else(|| format!("Payment API returned no response"))?;
+        let resp = resp.ok_or_else(|| "Payment API returned no response".to_string())?;
 
         if let Some(evt) = eg::event::EgEvent::parse(&resp) {
             if let Some(d) = evt.desc() {

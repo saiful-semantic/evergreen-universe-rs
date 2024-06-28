@@ -10,7 +10,6 @@ use std::collections::HashMap;
 
 pub struct CheckinResult {
     ok: bool,
-    current_loc: String,
     permanent_loc: String,
     destination_loc: Option<String>,
     patron_barcode: Option<String>,
@@ -23,9 +22,9 @@ impl Session {
     pub fn handle_checkin(&mut self, msg: &sip2::Message) -> EgResult<sip2::Message> {
         let barcode = msg
             .get_field_value("AB")
-            .ok_or_else(|| format!("handle_item_info() missing item barcode"))?;
+            .ok_or_else(|| "handle_item_info() missing item barcode".to_string())?;
 
-        let current_loc_op = msg.get_field_value("AP");
+        let checkin_loc_op = msg.get_field_value("AP");
         let return_date = &msg.fixed_fields()[2];
 
         // KCLS only
@@ -37,10 +36,10 @@ impl Session {
 
         log::info!("{self} Checking in item {barcode}");
 
-        let item = match self.get_item_details(&barcode)? {
+        let item = match self.get_item_details(barcode)? {
             Some(c) => c,
             None => {
-                return Ok(self.return_checkin_item_not_found(&barcode));
+                return Ok(self.return_checkin_item_not_found(barcode));
             }
         };
 
@@ -52,7 +51,7 @@ impl Session {
             }
             None => self.checkin(
                 &item,
-                current_loc_op,
+                checkin_loc_op,
                 return_date.value(),
                 undo_hold_fulfillment,
                 self.config().setting_is_true("checkin_override_all"),
@@ -69,14 +68,13 @@ impl Session {
                 &sip2::util::sip_date_now(),
             ],
             &[
-                ("AB", &barcode),
+                ("AB", barcode),
                 ("AO", self.config().institution()),
                 ("AJ", &item.title),
-                ("AP", &result.current_loc),
                 ("AQ", &result.permanent_loc),
-                ("BG", &item.owning_loc),
-                ("BT", &item.fee_type),
-                ("CI", "N"), // security inhibit
+                ("CK", &item.media_type),
+                ("CR", &item.collection_code),
+                ("CS", &item.call_number),
             ],
         )
         .unwrap();
@@ -123,7 +121,6 @@ impl Session {
 
         Some(CheckinResult {
             ok: false,
-            current_loc: item.current_loc.to_string(),
             permanent_loc: item.permanent_loc.to_string(),
             destination_loc: None,
             patron_barcode: None,
@@ -144,7 +141,7 @@ impl Session {
                 &sip2::util::sip_date_now(),
             ],
             &[
-                ("AB", &barcode),
+                ("AB", barcode),
                 ("AO", self.config().institution()),
                 ("CV", sip2::spec::CheckinAlert::Unknown.into()),
             ],
@@ -155,7 +152,7 @@ impl Session {
     fn checkin(
         &mut self,
         item: &item::Item,
-        current_loc_op: Option<&str>,
+        checkin_loc_op: Option<&str>,
         return_date: &str,
         cancel: bool,
         ovride: bool,
@@ -163,9 +160,9 @@ impl Session {
         // There is no seed data for use_native_checkin, so this will
         // always be false unless locally modified.
         if self.config().setting_is_true("use_native_checkin") {
-            self.checkin_native(item, current_loc_op, return_date, cancel, ovride)
+            self.checkin_native(item, checkin_loc_op, return_date, cancel, ovride)
         } else {
-            self.checkin_api(item, current_loc_op, return_date, cancel, ovride)
+            self.checkin_api(item, checkin_loc_op, return_date, cancel, ovride)
         }
     }
 
@@ -173,14 +170,14 @@ impl Session {
     fn checkin_api(
         &mut self,
         item: &item::Item,
-        current_loc_op: Option<&str>,
+        checkin_loc_op: Option<&str>,
         return_date: &str,
         cancel: bool,
         ovride: bool,
     ) -> EgResult<CheckinResult> {
         let mut args = eg::hash! {
-            copy_barcode: item.barcode.as_str(),
-            hold_as_transit: self.config().setting_is_true("checkin_holds_as_transits"),
+            "copy_barcode": item.barcode.as_str(),
+            "hold_as_transit": self.config().setting_is_true("checkin_holds_as_transits"),
         };
 
         if cancel {
@@ -192,7 +189,7 @@ impl Session {
 
             // Use NaiveDate since SIP dates don't typically include a
             // time zone value.
-            if let Some(sip_date) = NaiveDateTime::parse_from_str(return_date, fmt).ok() {
+            if let Ok(sip_date) = NaiveDateTime::parse_from_str(return_date, fmt) {
                 let iso_date = sip_date.format("%Y-%m-%d").to_string();
                 log::info!("{self} Checking in with backdate: {iso_date}");
 
@@ -202,7 +199,7 @@ impl Session {
             }
         }
 
-        if let Some(sn) = current_loc_op {
+        if let Some(sn) = checkin_loc_op {
             if let Some(org) = self.org_from_sn(sn)? {
                 args["circ_lib"] = org["id"].clone();
             }
@@ -217,6 +214,8 @@ impl Session {
             false => "open-ils.circ.checkin",
         };
 
+        log::info!("{self} checking in items with args: {}", args.dump());
+
         let params = vec![EgValue::from(self.editor().authtoken().unwrap()), args];
 
         let mut resp =
@@ -229,7 +228,11 @@ impl Session {
                 None => Err(format!("API call {method} failed to return a response"))?,
             };
 
-        log::debug!("{self} Checkin of {} returned: {resp}", item.barcode);
+        log::info!(
+            "{self} Checkin of {} returned: {}",
+            item.barcode,
+            resp.dump()
+        );
 
         let evt_json = if resp.is_array() {
             resp[0].take()
@@ -245,10 +248,9 @@ impl Session {
             .setting_is_true(&format!("checkin.override.{}", evt.textcode()));
 
         if !ovride && can_override {
-            return self.checkin(item, current_loc_op, return_date, cancel, true);
+            return self.checkin(item, checkin_loc_op, return_date, cancel, true);
         }
 
-        let mut current_loc = item.current_loc.to_string(); // item.circ_lib
         let mut permanent_loc = item.permanent_loc.to_string(); // item.circ_lib
         let mut destination_loc = None;
         if let Some(org_id) = evt.org() {
@@ -271,7 +273,6 @@ impl Session {
                 if circ_lib != item.circ_lib {
                     if let Some(org) = self.org_from_id(circ_lib)? {
                         let loc = org["shortname"].as_str().unwrap();
-                        current_loc = loc.to_string();
                         permanent_loc = loc.to_string();
                     }
                 }
@@ -280,7 +281,6 @@ impl Session {
 
         let mut result = CheckinResult {
             ok: false,
-            current_loc,
             permanent_loc,
             destination_loc,
             patron_barcode: None,
@@ -327,7 +327,7 @@ impl Session {
     fn checkin_native(
         &mut self,
         item: &item::Item,
-        current_loc_op: Option<&str>,
+        checkin_loc_op: Option<&str>,
         return_date: &str,
         cancel: bool,
         ovride: bool,
@@ -348,7 +348,7 @@ impl Session {
 
             // Use NaiveDate since SIP dates don't typically include a
             // time zone value.
-            if let Some(sip_date) = NaiveDateTime::parse_from_str(return_date, fmt).ok() {
+            if let Ok(sip_date) = NaiveDateTime::parse_from_str(return_date, fmt) {
                 let iso_date = sip_date.format("%Y-%m-%d").to_string();
                 log::info!("{self} Checking in with backdate: {iso_date}");
 
@@ -358,7 +358,7 @@ impl Session {
             }
         }
 
-        if let Some(sn) = current_loc_op {
+        if let Some(sn) = checkin_loc_op {
             if let Some(org) = self.org_from_sn(sn)? {
                 options.insert("circ_lib".to_string(), org["id"].clone());
             } else {
@@ -392,8 +392,8 @@ impl Session {
                 circulator.commit()?;
                 circulator
                     .events()
-                    .get(0)
-                    .ok_or_else(|| format!("API call failed to return an event"))?
+                    .first()
+                    .ok_or_else(|| "API call failed to return an event".to_string())?
             }
             Err(err) => {
                 circulator.rollback()?;
@@ -407,10 +407,9 @@ impl Session {
             .setting_is_true(&format!("checkin.override.{}", evt.textcode()));
 
         if !ovride && can_override {
-            return self.checkin(item, current_loc_op, return_date, cancel, true);
+            return self.checkin(item, checkin_loc_op, return_date, cancel, true);
         }
 
-        let mut current_loc = item.current_loc.to_string(); // item.circ_lib
         let mut permanent_loc = item.permanent_loc.to_string(); // item.circ_lib
 
         let mut destination_loc = None;
@@ -434,7 +433,6 @@ impl Session {
                 if circ_lib != item.circ_lib {
                     if let Some(org) = self.org_from_id(circ_lib)? {
                         let loc = org["shortname"].as_str().unwrap();
-                        current_loc = loc.to_string();
                         permanent_loc = loc.to_string();
                     }
                 }
@@ -443,7 +441,6 @@ impl Session {
 
         let mut result = CheckinResult {
             ok: false,
-            current_loc,
             permanent_loc,
             destination_loc,
             patron_barcode: None,
@@ -466,7 +463,7 @@ impl Session {
             }
         }
 
-        self.handle_checkin_hold(&evt, &mut result)?;
+        self.handle_checkin_hold(evt, &mut result)?;
 
         if evt.textcode().eq("SUCCESS") || evt.textcode().eq("NO_CHANGE") {
             result.ok = true;

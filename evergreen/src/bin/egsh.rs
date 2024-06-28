@@ -2,15 +2,10 @@ use eg::common::auth;
 use eg::Client;
 use eg::EgValue;
 use evergreen as eg;
-use serde_json;
-use sip2;
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
 use std::time::Instant;
-
-use getopts;
-use rustyline;
 
 use eg::common::settings;
 use eg::db;
@@ -119,6 +114,8 @@ Commands
             item-information <item-barcode>
             patron-information <patron-barcode>
             patron-status <patron-barcode>
+            checkin <item-barcode>
+            checkout <item-barcode> <patron-barcode>
 
     help
         Show this message
@@ -232,7 +229,7 @@ impl Shell {
     fn db_translator_mut(&mut self) -> Result<&mut idldb::Translator, String> {
         self.db_translator
             .as_mut()
-            .ok_or_else(|| format!("DB connection required"))
+            .ok_or_else(|| "DB connection required".to_string())
     }
 
     /// Main entry point.
@@ -289,12 +286,12 @@ impl Shell {
 
                     let command = buffer.trim();
 
-                    if command.len() == 0 {
+                    if command.is_empty() {
                         // Empty line, but maybe still more data to process.
                         continue;
                     }
 
-                    if let Err(e) = self.dispatch_command(&command) {
+                    if let Err(e) = self.dispatch_command(command) {
                         eprintln!("Error processing piped requests: {e}");
                         break;
                     }
@@ -326,16 +323,16 @@ impl Shell {
 
         let user_input = user_input.trim();
 
-        if user_input.len() == 0 {
+        if user_input.is_empty() {
             return Ok(());
         }
 
         // Add all commands to history -- often useful to repeat
         // commands that failed.
-        self.add_to_history(readline, &user_input);
+        self.add_to_history(readline, user_input);
 
         self.result_count = 0;
-        self.dispatch_command(&user_input)?;
+        self.dispatch_command(user_input)?;
         self.print_duration(&now);
 
         Ok(())
@@ -347,15 +344,15 @@ impl Shell {
         if self.result_count > 0 {
             print!("; Results: {}", self.result_count);
         }
-        println!("");
+        println!();
         println!("{SEPARATOR}");
     }
 
     /// Route a command line to its handler.
     fn dispatch_command(&mut self, line: &str) -> Result<(), String> {
-        let full_args: Vec<&str> = line.split(" ").collect();
+        let full_args: Vec<&str> = line.split(' ').collect();
 
-        if full_args.len() == 0 {
+        if full_args.is_empty() {
             return Ok(());
         }
 
@@ -457,6 +454,25 @@ impl Shell {
                 .unwrap()
                 .patron_status(&sip_params)
                 .map_err(|e| e.to_string())?
+        } else if command == "checkin" {
+            self.args_min_length(args, 3)?; //  item barcode
+            sip_params.set_item_id(args[2]);
+
+            self.sip_client
+                .as_mut()
+                .unwrap()
+                .checkin(&sip_params)
+                .map_err(|e| e.to_string())?
+        } else if command == "checkout" {
+            self.args_min_length(args, 4)?; //  item barcode, patron barcode
+            sip_params.set_item_id(args[2]);
+            sip_params.set_patron_id(args[3]);
+
+            self.sip_client
+                .as_mut()
+                .unwrap()
+                .checkout(&sip_params)
+                .map_err(|e| e.to_string())?
         } else {
             return Err(format!("Unsupported SIP command {command}"));
         };
@@ -471,7 +487,11 @@ impl Shell {
         let action = args[0]; // retrieve, search, json_query
 
         if action == "json_query" {
-            return self.send_request(&["open-ils.cstore", "open-ils.cstore.json_query", &args[1]]);
+            return self.send_request(&[
+                "open-ils.cstore",
+                "open-ils.cstore.json_query",
+                (args[1]),
+            ]);
         }
 
         // retrieve and search require an additional class specifier
@@ -483,7 +503,7 @@ impl Shell {
 
         if class.contains("::") {
             class = class.replace("::", ".");
-        } else if !class.contains(".") {
+        } else if !class.contains('.') {
             // Caller provided a class hint.  Translate that into
             // the fieldmapper string used by cstore APIs.
 
@@ -538,7 +558,7 @@ impl Shell {
         if args.len() > 2 {
             let org_id = args[2]
                 .parse::<i64>()
-                .or_else(|_| Err(format!("Invalid org unit ID: {}", args[2])))?;
+                .map_err(|_| format!("Invalid org unit ID: {}", args[2]))?;
 
             sc.set_org_id(org_id);
         } else if let Some(authses) = &self.auth_session {
@@ -546,7 +566,7 @@ impl Shell {
             editor.checkauth()?;
             sc.set_editor(&editor);
         } else {
-            Err(format!("Org unit or authtoken required to check settings"))?;
+            Err("Org unit or authtoken required to check settings".to_string())?;
         }
 
         let name = &args[1];
@@ -587,7 +607,7 @@ impl Shell {
             "json_print_depth" => {
                 let value_num = value
                     .parse::<u16>()
-                    .or_else(|e| Err(format!("Invalid value for {pref} {e}")))?;
+                    .map_err(|e| format!("Invalid value for {pref} {e}"))?;
                 self.json_print_depth = value_num;
             }
             "json_as_wire_protocal" => self.json_as_wire_protocal = value.to_lowercase() == "true",
@@ -618,7 +638,7 @@ impl Shell {
 
         let authtoken = match &self.auth_session {
             Some(s) => EgValue::from(s.token()).dump(),
-            None => return Err(format!("reqauth requires an auth token")),
+            None => return Err("reqauth requires an auth token".to_string()),
         };
 
         let mut params = args.to_vec();
@@ -747,12 +767,12 @@ impl Shell {
 
         let db = match &mut self.db {
             Some(d) => d,
-            None => return Err(format!("'db' command requires --with-database")),
+            None => return Err("'db' command requires --with-database".to_string()),
         };
 
         let query = "SELECT PG_SLEEP($1)";
 
-        let query_res = db.borrow_mut().client().query(&query[..], &[&secs]);
+        let query_res = db.borrow_mut().client().query(query, &[&secs]);
 
         if let Err(e) = query_res {
             return Err(format!("DB query failed: {e}"));
@@ -781,7 +801,7 @@ impl Shell {
         match args[1] {
             "get" => self.idl_get(args),
             "search" => self.idl_search(args),
-            _ => return Err(format!("Could not parse idl query command: {args:?}")),
+            _ => Err(format!("Could not parse idl query command: {args:?}")),
         }
     }
 
@@ -819,7 +839,7 @@ impl Shell {
             Err(format!("No such IDL field: {fieldname}"))?;
         }
 
-        if !db::is_supported_operator(&operator) {
+        if !db::is_supported_operator(operator) {
             Err(format!("Invalid query operator: {operator}"))?;
         }
 

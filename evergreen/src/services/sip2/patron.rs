@@ -131,6 +131,7 @@ pub struct Patron {
     pub net_access: Option<String>,
     pub profile: Option<String>,
     pub phone: Option<String>,
+    pub screen_msg: Option<String>,
 }
 
 impl Patron {
@@ -171,6 +172,7 @@ impl Patron {
             net_access: None,
             profile: None,
             phone: None,
+            screen_msg: None,
         }
     }
 }
@@ -184,7 +186,7 @@ impl Session {
     ) -> EgResult<Option<Patron>> {
         log::info!("{self} SIP patron details for {barcode}");
 
-        if barcode == "" {
+        if barcode.is_empty() {
             // May as well skip the query if it's empty.
             return Ok(None);
         }
@@ -200,6 +202,8 @@ impl Session {
         let mut patron = Patron::new(barcode, self.format_user_name(&user));
 
         patron.id = user.id()?;
+        // Patron password is an optional field.  Is an undefined password
+        // valid?  This code says no. EG SIPServer says yes.
         patron.password_verified = self.check_password(patron.id, password_op)?;
 
         if let Some(summary) = self.editor().retrieve("mous", patron.id)? {
@@ -213,7 +217,7 @@ impl Session {
         }
 
         if let Some(email) = user["email"].as_str() {
-            if email.len() > 0 {
+            if !email.is_empty() {
                 patron.email = Some(email.to_string());
             }
         };
@@ -225,7 +229,7 @@ impl Session {
         // DoB is stored in the database as a YYYY-MM-DD value / no time.
         // SIP wants YYYYMMDD instead.
         if let Some(dob) = user["dob"].as_str() {
-            let ymd = dob.replace("-", "");
+            let ymd = dob.replace('-', "");
             patron.dob = Some(ymd);
         }
 
@@ -243,7 +247,7 @@ impl Session {
                 .unwrap_or(user["other_phone"].as_str().unwrap_or("")),
         );
 
-        if phone.len() > 0 {
+        if !phone.is_empty() {
             patron.phone = Some(phone.to_string());
         }
 
@@ -284,12 +288,14 @@ impl Session {
 
         let resp = self.editor().json_query(query)?;
 
-        if resp.len() > 0 {
+        if !resp.is_empty() {
             self.editor().commit()?;
             Ok(())
         } else {
             self.editor().rollback()?;
-            Err(format!("Patron activity logging returned no response").into())
+            Err("Patron activity logging returned no response"
+                .to_string()
+                .into())
         }
     }
 
@@ -318,7 +324,7 @@ impl Session {
         patron: &mut Patron,
         summary_ops: &SummaryListOptions,
     ) -> EgResult<()> {
-        let xacts = self.get_patron_xacts(&patron, Some(summary_ops))?;
+        let xacts = self.get_patron_xacts(patron, Some(summary_ops))?;
 
         let mut fines: Vec<String> = Vec::new();
 
@@ -417,10 +423,10 @@ impl Session {
 
     fn get_circ_title_author(&mut self, id: i64) -> EgResult<(Option<String>, Option<String>)> {
         let flesh = eg::hash! {
-            flesh: 4,
-            flesh_fields: {
-                circ: ["target_copy"],
-                acp: ["call_number"],
+            "flesh": 4,
+            "flesh_fields": {
+                "circ": ["target_copy"],
+                "acp": ["call_number"],
             }
         };
 
@@ -481,15 +487,15 @@ impl Session {
         let mut format = Msg64SummaryDatatype::Barcode;
 
         if let Some(set) = self.config().settings().get("msg64_summary_datatype") {
-            if set.str()?.starts_with("t") {
+            if set.str()?.starts_with('t') {
                 format = Msg64SummaryDatatype::Title;
             }
         }
 
         if format == Msg64SummaryDatatype::Barcode {
             let flesh = eg::hash! {
-                flesh: 1,
-                flesh_fields: {circ: ["target_copy"]},
+                "flesh": 1,
+                "flesh_fields": {"circ": ["target_copy"]},
             };
 
             // If we have a circ ID, we have to have a circ.
@@ -520,7 +526,7 @@ impl Session {
         let mut format = Msg64HoldDatatype::Barcode;
 
         if let Some(set) = self.config().settings().get("msg64_hold_datatype") {
-            if set.str()?.starts_with("t") {
+            if set.str()?.starts_with('t') {
                 format = Msg64HoldDatatype::Title;
             }
         }
@@ -548,10 +554,8 @@ impl Session {
                     if let Some(copy) = self.find_copy_for_hold(&hold)? {
                         hold_items.push(copy["barcode"].as_str().unwrap().to_string());
                     }
-                } else {
-                    if let Some(title) = self.find_title_for_hold(&hold)? {
-                        hold_items.push(title);
-                    }
+                } else if let Some(title) = self.find_title_for_hold(&hold)? {
+                    hold_items.push(title);
                 }
             }
         }
@@ -570,13 +574,13 @@ impl Session {
 
         let bib_id = bib_link["bib_record"].int()?;
         let search = eg::hash! {
-            source: bib_id,
-            name: "title",
+            "source": bib_id,
+            "name": "title",
         };
 
         let title_fields = self.editor().search("mfde", search)?;
 
-        if let Some(tf) = title_fields.get(0) {
+        if let Some(tf) = title_fields.first() {
             if let Some(v) = tf["value"].as_str() {
                 return Ok(Some(v.to_string()));
             }
@@ -608,7 +612,7 @@ impl Session {
         let mut bre_ids: Vec<i64> = Vec::new();
 
         if hold_type.eq("M") {
-            let search = eg::hash! { metarecord: hold_target };
+            let search = eg::hash! {"metarecord": hold_target};
             let maps = self.editor().search("mmrsm", search)?;
             for map in maps {
                 bre_ids.push(map["record"].int()?);
@@ -618,17 +622,17 @@ impl Session {
         }
 
         let query = eg::hash! {
-            select: {acp: ["id"]},
-            from: {acp: "acn"},
-            where: {
-                "+acp": {deleted: "f"},
-                "+acn": {record: bre_ids, deleted: "f"}
+            "select": {"acp": ["id"]},
+            "from": {"acp": "acn"},
+            "where": {
+                "+acp": {"deleted": "f"},
+                "+acn": {"record": bre_ids, "deleted": "f"}
             },
             limit: 1
         };
 
         let copy_id_hashes = self.editor().json_query(query)?;
-        if copy_id_hashes.len() > 0 {
+        if !copy_id_hashes.is_empty() {
             let copy_id = copy_id_hashes[0].int()?;
             return self.editor().retrieve("acp", copy_id);
         }
@@ -638,11 +642,11 @@ impl Session {
 
     fn get_copy_for_vol(&mut self, vol_id: i64) -> EgResult<Option<EgValue>> {
         let search = eg::hash! {
-            call_number: vol_id,
-            deleted: "f",
+            "call_number": vol_id,
+            "deleted": "f",
         };
 
-        let ops = eg::hash! { limit: 1usize };
+        let ops = eg::hash! {"limit": 1};
 
         let mut copies = self.editor().search_with_ops("acp", search, ops)?;
 
@@ -658,7 +662,7 @@ impl Session {
             let overdue: Vec<i64> = summary["overdue"]
                 .as_str()
                 .unwrap()
-                .split(",")
+                .split(',')
                 .map(|id| id.parse::<i64>().unwrap())
                 .filter(|id| id > &0)
                 .collect();
@@ -666,18 +670,18 @@ impl Session {
             let outs: Vec<i64> = summary["out"]
                 .as_str()
                 .unwrap()
-                .split(",")
+                .split(',')
                 .map(|id| id.parse::<i64>().unwrap())
                 .filter(|id| id > &0)
                 .collect();
 
             patron.items_overdue_count = overdue.len();
-            patron.items_out_count = outs.len();
+            patron.items_out_count = outs.len() + overdue.len();
             patron.items_overdue_ids = overdue;
             patron.items_out_ids = outs;
         }
 
-        let summaries = self.get_patron_xacts(&patron, None)?;
+        let summaries = self.get_patron_xacts(patron, None)?;
         patron.fine_count = summaries.len();
 
         Ok(())
@@ -689,13 +693,13 @@ impl Session {
         summary_ops: Option<&SummaryListOptions>,
     ) -> EgResult<Vec<EgValue>> {
         let search = eg::hash! {
-            usr: patron.id,
-            balance_owed: {"<>": 0},
-            total_owed: {">": 0},
+            "usr": patron.id,
+            "balance_owed": {"<>": 0},
+            "total_owed": {">": 0},
         };
 
         let mut ops = eg::hash! {
-            order_by: {mbts: "xact_start"}
+            order_by: {"mbts": "xact_start"}
         };
 
         if let Some(sum_ops) = summary_ops {
@@ -729,9 +733,9 @@ impl Session {
         }
 
         let mut query = eg::hash! {
-            select: {ahr: ["id"]},
-            from: "ahr",
-            where: {"+ahr": search},
+            "select": {"ahr": ["id"]},
+            "from": "ahr",
+            "where": {"+ahr": search},
         };
 
         if let Some(l) = limit {
@@ -763,7 +767,7 @@ impl Session {
 
     fn set_patron_privileges(&mut self, user: &EgValue, patron: &mut Patron) -> EgResult<()> {
         let expire_date_str = user["expire_date"].as_str().unwrap(); // required
-        let expire_date = date::parse_datetime(&expire_date_str)?;
+        let expire_date = date::parse_datetime(expire_date_str)?;
 
         if expire_date < eg::date::now() {
             // Patron is expired.  Don't bother checking other penalties, etc.
@@ -792,17 +796,17 @@ impl Session {
 
         let mut block_tags = String::new();
         for pen in penalties.iter() {
-            if let Some(tag) = pen["block_tag"].as_str() {
+            if let Some(tag) = pen["block_list"].as_str() {
                 block_tags += tag;
             }
         }
 
-        if !blocked && block_tags.len() == 0 {
+        if !blocked && block_tags.is_empty() {
             // No blocks, etc. left to inspect.  All done.
             return Ok(());
         }
 
-        patron.holds_denied = blocked || block_tags.contains("HOLDS");
+        patron.holds_denied = blocked || block_tags.contains("HOLD");
 
         if self.config().setting_is_true("patron_status_permit_loans") {
             // We're going to ignore checkout, renewals blocks for now.
@@ -816,7 +820,11 @@ impl Session {
         // doesn't mean they would not have said privilege if the functionality
         // existed.  Base the ability to perform recalls on whether they have
         // checkout and holds privilege, since both would be needed for recalls.
-        patron.recall_denied = patron.charge_denied || patron.renew_denied;
+        patron.recall_denied = patron.charge_denied || patron.holds_denied;
+
+        // Matching EG SIPServer.
+        // Unknown if it serves a purpose.
+        patron.screen_msg = Some("blocked".to_string());
 
         Ok(())
     }
@@ -839,22 +847,22 @@ impl Session {
             from: {ausp: "csp"},
             where: {
                 "+ausp": {
-                    usr: user_id,
+                    "usr": user_id,
                     "-or": [
-                      {stop_date: EG_NULL},
-                      {stop_date: {">": "now"}},
+                      {"stop_date": EG_NULL},
+                      {"stop_date": {">": "now"}},
                     ],
-                    org_unit: {
-                        in: {
-                            select: {
-                                aou: [{
-                                    transform: "actor.org_unit_full_path",
-                                    column: "id",
-                                    result_field: "id",
+                    "org_unit": {
+                        "in": {
+                            "select": {
+                                "aou": [{
+                                    "transform": "actor.org_unit_full_path",
+                                    "column": "id",
+                                    "result_field": "id",
                                 }]
                             },
-                            from: "aou",
-                            where: {id: ws_org}
+                            "from": "aou",
+                            "where": {"id": ws_org}
                         }
                     }
                 }
@@ -865,21 +873,21 @@ impl Session {
     }
 
     fn get_user(&mut self, barcode: &str) -> EgResult<Option<EgValue>> {
-        let search = eg::hash! { barcode: barcode };
+        let search = eg::hash! {"barcode": barcode};
 
         let flesh = eg::hash! {
-            flesh: 3,
-            flesh_fields: {
-                ac: ["usr"],
-                au: ["billing_address", "mailing_address", "profile",
+            "flesh": 3,
+            "flesh_fields": {
+                "ac": ["usr"],
+                "au": ["billing_address", "mailing_address", "profile",
                     "stat_cat_entries", "home_ou", "net_access_level"],
-                actscecm: ["stat_cat"]
+                "actscecm": ["stat_cat"]
             }
         };
 
         let mut cards = self.editor().search_with_ops("ac", search, flesh)?;
 
-        if cards.len() == 0 {
+        if cards.is_empty() {
             return Ok(None);
         }
 
@@ -903,9 +911,9 @@ impl Session {
         let barcode = sip_msg.get_field_value("AA").unwrap_or("");
         let password_op = sip_msg.get_field_value("AD"); // optional
 
-        let patron_op = self.get_patron_details(&barcode, password_op.as_deref(), None)?;
+        let patron_op = self.get_patron_details(barcode, password_op, None)?;
 
-        self.patron_response_common("24", &barcode, patron_op.as_ref())
+        self.patron_response_common("24", barcode, patron_op.as_ref())
     }
 
     pub fn handle_patron_info(&mut self, sip_msg: sip2::Message) -> EgResult<sip2::Message> {
@@ -932,7 +940,7 @@ impl Session {
 
         // Position of the "Y" value, of which there should only be 1,
         // indicates which type of extra summary data to include.
-        let list_type = match summary_ff.value().find("Y") {
+        let list_type = match summary_ff.value().find('Y') {
             Some(idx) => match idx {
                 0 => SummaryListType::HoldItems,
                 1 => SummaryListType::OverdueItems,
@@ -950,10 +958,9 @@ impl Session {
             end_item,
         };
 
-        let patron_op =
-            self.get_patron_details(&barcode, password_op.as_deref(), Some(&list_ops))?;
+        let patron_op = self.get_patron_details(barcode, password_op, Some(&list_ops))?;
 
-        let mut resp = self.patron_response_common("64", &barcode, patron_op.as_ref())?;
+        let mut resp = self.patron_response_common("64", barcode, patron_op.as_ref())?;
 
         let patron = match patron_op {
             Some(p) => p,
@@ -989,7 +996,7 @@ impl Session {
         barcode: &str,
         patron_op: Option<&Patron>,
     ) -> EgResult<sip2::Message> {
-        let sbool = |v| sip2::util::space_bool(v); // local shorthand
+        let sbool = sip2::util::space_bool; // local shorthand
         let sipdate = sip2::util::sip_date_now();
 
         if patron_op.is_none() {
@@ -1074,6 +1081,7 @@ impl Session {
         )
         .unwrap();
 
+        resp.maybe_add_field("AF", patron.screen_msg.as_deref());
         resp.maybe_add_field("BD", patron.address.as_deref());
         resp.maybe_add_field("BE", patron.email.as_deref());
 
@@ -1084,14 +1092,14 @@ impl Session {
         let barcode = sip_msg.get_field_value("AA").unwrap_or("");
         let block_msg_op = sip_msg.get_field_value("AL");
 
-        let patron = match self.get_patron_details(&barcode, None, None)? {
+        let patron = match self.get_patron_details(barcode, None, None)? {
             Some(p) => p,
-            None => return self.patron_response_common("24", &barcode, None),
+            None => return self.patron_response_common("24", barcode, None),
         };
 
         if !patron.card_active {
             log::info!("{self} patron {barcode} is already inactive");
-            return self.patron_response_common("24", &barcode, Some(&patron));
+            return self.patron_response_common("24", barcode, Some(&patron));
         }
 
         let mut card = self
@@ -1099,7 +1107,7 @@ impl Session {
             .search("ac", eg::hash! {"barcode": barcode})?
             .pop()
             // should not be able to get here.
-            .ok_or_else(|| format!("Patron card search returned nothing"))?;
+            .ok_or_else(|| "Patron card search returned nothing".to_string())?;
 
         self.editor().xact_begin()?;
 
@@ -1140,8 +1148,8 @@ impl Session {
 
         let params = vec![
             EgValue::from(self.editor().authtoken().unwrap()),
-            EgValue::from(penalty),
-            EgValue::from(penalty_message),
+            penalty,
+            penalty_message,
         ];
 
         let penalty_result = self
@@ -1163,9 +1171,9 @@ impl Session {
 
         // Update our patron so the response data can indicate the
         // card is now inactive.
-        let patron = self.get_patron_details(&barcode, None, None)?.unwrap();
+        let patron = self.get_patron_details(barcode, None, None)?.unwrap();
 
         // SIP message 01 wants a message 24 (patron status) response.
-        self.patron_response_common("24", &barcode, Some(&patron))
+        self.patron_response_common("24", barcode, Some(&patron))
     }
 }

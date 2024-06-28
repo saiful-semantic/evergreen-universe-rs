@@ -7,7 +7,6 @@ use eg::osrf::message;
 use eg::Client;
 use eg::EgResult;
 use evergreen as eg;
-use mptc;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::env;
@@ -259,7 +258,7 @@ impl Session {
     fn run(stream: TcpStream, max_parallel: usize, shutdown: Arc<AtomicBool>) -> EgResult<()> {
         let client_ip = stream
             .peer_addr()
-            .or_else(|e| Err(format!("Could not determine client IP address: {e}")))?;
+            .map_err(|e| format!("Could not determine client IP address: {e}"))?;
 
         log::debug!("Starting new session for {client_ip}");
 
@@ -268,11 +267,11 @@ impl Session {
         let instream = stream;
         let outstream = instream
             .try_clone()
-            .or_else(|e| Err(format!("Fatal error splitting client streams: {e}")))?;
+            .map_err(|e| format!("Fatal error splitting client streams: {e}"))?;
 
         // Wrap each endpoint in a WebSocket container.
-        let receiver = ws::accept(instream)
-            .or_else(|e| Err(format!("Error accepting new connection: {}", e)))?;
+        let receiver =
+            ws::accept(instream).map_err(|e| format!("Error accepting new connection: {}", e))?;
 
         let sender = WebSocket::from_raw_socket(outstream, ws::protocol::Role::Server, None);
 
@@ -300,13 +299,13 @@ impl Session {
 
         let mut inbound = SessionInbound {
             to_main_tx: to_main_tx.clone(),
-            client_ip: client_ip.clone(),
+            client_ip,
             shutdown_session: shutdown_session.clone(),
         };
 
         let mut outbound = SessionOutbound {
             to_main_tx: to_main_tx.clone(),
-            client_ip: client_ip.clone(),
+            client_ip,
             shutdown_session: shutdown_session.clone(),
             osrf_receiver,
         };
@@ -320,7 +319,7 @@ impl Session {
             reqs_in_flight: 0,
             format: None,
             shutdown,
-            shutdown_session: shutdown_session,
+            shutdown_session,
             osrf_sessions: HashMap::new(),
             request_queue: VecDeque::new(),
         };
@@ -385,7 +384,7 @@ impl Session {
             return true;
         }
 
-        return false;
+        false
     }
 
     /// Main Session listen loop
@@ -461,7 +460,7 @@ impl Session {
             }
         }
 
-        if self.request_queue.len() > 0 {
+        if !self.request_queue.is_empty() {
             log::warn!(
                 "{self} MAX_ACTIVE_REQUESTS reached. {} messages queued",
                 self.request_queue.len()
@@ -497,7 +496,7 @@ impl Session {
                 let message = WebSocketMessage::Pong(text);
                 self.sender
                     .write_message(message)
-                    .or_else(|e| Err(format!("{self} Error sending Pong to client: {e}")))?;
+                    .map_err(|e| format!("{self} Error sending Pong to client: {e}"))?;
                 Ok(false)
             }
             WebSocketMessage::Close(_) => {
@@ -514,11 +513,8 @@ impl Session {
     /// Wrap a websocket request in an OpenSRF transport message and
     /// put on the OpenSRF bus for delivery.
     fn relay_to_osrf(&mut self, json_text: &str) -> Result<(), String> {
-        let mut wrapper = json::parse(json_text).or_else(|e| {
-            Err(format!(
-                "{self} Cannot parse websocket message: {e} {json_text}"
-            ))
-        })?;
+        let mut wrapper = json::parse(json_text)
+            .map_err(|e| format!("{self} Cannot parse websocket message: {e} {json_text}"))?;
 
         let thread = wrapper["thread"].take();
         let log_xid = wrapper["log_xid"].take();
@@ -735,11 +731,9 @@ impl Session {
 
         let msg = WebSocketMessage::Text(msg_json);
 
-        self.sender.write_message(msg).or_else(|e| {
-            Err(format!(
-                "{self} Error sending response to websocket client: {e}"
-            ))
-        })
+        self.sender
+            .write_message(msg)
+            .map_err(|e| format!("{self} Error sending response to websocket client: {e}"))
     }
 
     /// Log an API call, honoring the log-protect configs.
@@ -847,11 +841,8 @@ impl WebsocketStream {
     fn new(client: Client, address: &str, port: u16, max_parallel: usize) -> Result<Self, String> {
         log::info!("EG Websocket listening at {address}:{port}");
 
-        let listener = eg::util::tcp_listener(address, port, SIG_POLL_INTERVAL).or_else(|e| {
-            Err(format!(
-                "Cannot listen for connections at {address}:{port} {e}"
-            ))
-        })?;
+        let listener = eg::util::tcp_listener(address, port, SIG_POLL_INTERVAL)
+            .map_err(|e| format!("Cannot listen for connections at {address}:{port} {e}"))?;
 
         let stream = WebsocketStream {
             listener,
@@ -880,7 +871,7 @@ impl mptc::RequestStream for WebsocketStream {
             stream: Some(stream),
         };
 
-        return Ok(Some(Box::new(request)));
+        Ok(Some(Box::new(request)))
     }
 
     fn new_handler(&mut self) -> Box<dyn mptc::RequestHandler> {

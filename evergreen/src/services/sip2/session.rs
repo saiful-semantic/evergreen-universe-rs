@@ -53,6 +53,8 @@ const CACHE_PFX: &str = "sip2";
 /// renew all
 const INSTITUTION_SUPPORTS: &str = "YYYYYNYYYYYNNNYY";
 
+pub const DEFAULT_DUE_DATE_FORMAT: &str = "%F %T";
+
 #[derive(Debug)]
 pub struct SipFilter {
     /// 2-character SIP field code.
@@ -141,7 +143,7 @@ impl Session {
 
         Ok(Session {
             seskey: seskey.to_string(),
-            editor: editor,
+            editor,
             sip_account,
             config,
             org_cache: HashMap::new(),
@@ -227,7 +229,7 @@ impl Session {
 
         let auth_token = cached["ils_token"]
             .as_str()
-            .ok_or_else(|| format!("Cached session has no authtoken string"))?;
+            .ok_or_else(|| "Cached session has no authtoken string".to_string())?;
 
         let mut session = Session::new(editor, seskey, sip_account)?;
         session.editor.set_authtoken(auth_token);
@@ -238,7 +240,7 @@ impl Session {
             session.refresh_auth_token()?;
         }
 
-        return Ok(Some(session));
+        Ok(Some(session))
     }
 
     /// Put this session in to the cache.
@@ -246,11 +248,11 @@ impl Session {
         let authtoken = self
             .editor
             .authtoken()
-            .ok_or_else(|| format!("Cannot cache session with no authoken"))?;
+            .ok_or_else(|| "Cannot cache session with no authoken".to_string())?;
 
         let cache_val = eg::hash! {
-            sip_account: self.sip_account.clone(),
-            ils_token: authtoken,
+            "sip_account": self.sip_account.clone(),
+            "ils_token": authtoken,
         };
 
         // Cache the session using the default max cache time.
@@ -281,7 +283,7 @@ impl Session {
         self.editor.set_authtoken(auth_ses.token());
 
         if !self.editor.checkauth()? {
-            Err(format!("Cannot verify new authtoken?").into())
+            Err("Cannot verify new authtoken?".to_string().into())
         } else {
             Ok(())
         }

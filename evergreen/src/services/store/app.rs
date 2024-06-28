@@ -34,6 +34,12 @@ const DIRECT_METHODS: &[&str] = &["create", "retrieve", "search", "update", "del
 /// Our main application class.
 pub struct RsStoreApplication {}
 
+impl Default for RsStoreApplication {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RsStoreApplication {
     pub fn new() -> Self {
         RsStoreApplication {}
@@ -67,8 +73,7 @@ impl RsStoreApplication {
                 // not registered.
                 let stub = methods::METHODS
                     .iter()
-                    .filter(|m| m.name.eq(&format!("{mtype}-stub")))
-                    .next()
+                    .find(|m| m.name.eq(&format!("{mtype}-stub")))
                     .unwrap(); // these are hard-coded to exist.
 
                 let mut clone = stub.into_method(APPNAME);
@@ -86,29 +91,17 @@ impl RsStoreApplication {
 
     fn register_xact_methods(&self, methods: &mut Vec<MethodDef>) {
         let api = "transaction.begin";
-        let begin = methods::METHODS
-            .iter()
-            .filter(|m| m.name.eq(api))
-            .next()
-            .unwrap();
+        let begin = methods::METHODS.iter().find(|m| m.name.eq(api)).unwrap();
 
         methods.push(begin.into_method(APPNAME));
 
         let api = "transaction.rollback";
-        let rollback = methods::METHODS
-            .iter()
-            .filter(|m| m.name.eq(api))
-            .next()
-            .unwrap();
+        let rollback = methods::METHODS.iter().find(|m| m.name.eq(api)).unwrap();
 
         methods.push(rollback.into_method(APPNAME));
 
         let api = "transaction.commit";
-        let commit = methods::METHODS
-            .iter()
-            .filter(|m| m.name.eq(api))
-            .next()
-            .unwrap();
+        let commit = methods::METHODS.iter().find(|m| m.name.eq(api)).unwrap();
 
         methods.push(commit.into_method(APPNAME));
     }
@@ -134,8 +127,7 @@ impl Application for RsStoreApplication {
 
         let json_query = methods::METHODS
             .iter()
-            .filter(|m| m.name.eq("json_query"))
-            .next()
+            .find(|m| m.name.eq("json_query"))
             .unwrap();
 
         methods.push(json_query.into_method(APPNAME));
@@ -156,6 +148,12 @@ pub struct RsStoreWorker {
     methods: Option<Arc<HashMap<String, MethodDef>>>,
     database: Option<Rc<RefCell<DatabaseConnection>>>,
     last_work_timer: Option<eg::util::Timer>,
+}
+
+impl Default for RsStoreWorker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RsStoreWorker {
@@ -180,7 +178,7 @@ impl RsStoreWorker {
     pub fn downcast(w: &mut Box<dyn ApplicationWorker>) -> EgResult<&mut RsStoreWorker> {
         match w.as_any_mut().downcast_mut::<RsStoreWorker>() {
             Some(eref) => Ok(eref),
-            None => Err(format!("Cannot downcast").into()),
+            None => Err("Cannot downcast".to_string().into()),
         }
     }
 
@@ -249,7 +247,7 @@ impl ApplicationWorker for RsStoreWorker {
     }
 
     fn methods(&self) -> &Arc<HashMap<String, MethodDef>> {
-        &self.methods.as_ref().unwrap()
+        self.methods.as_ref().unwrap()
     }
 
     fn worker_start(

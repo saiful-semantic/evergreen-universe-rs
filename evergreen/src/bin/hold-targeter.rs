@@ -4,7 +4,6 @@ use eg::result::EgResult;
 use eg::util;
 use eg::EgValue;
 use evergreen as eg;
-use getopts;
 use std::thread;
 
 const HELP_TEXT: &str = r#"
@@ -79,7 +78,7 @@ fn main() -> EgResult<()> {
 
     let params = options
         .parse(&args[1..])
-        .or_else(|e| Err(format!("Error parsing params: {e}")))?;
+        .map_err(|e| format!("Error parsing params: {e}"))?;
 
     if params.opt_present("help") {
         println!("{HELP_TEXT}");
@@ -105,7 +104,7 @@ fn main() -> EgResult<()> {
         "return-throttle", // is number, but OK for json
     ] {
         if let Some(val) = params.opt_str(key) {
-            target_options[&key.replace("-", "_")] = EgValue::from(val);
+            target_options[&key.replace('-', "_")] = EgValue::from(val);
         }
     }
 

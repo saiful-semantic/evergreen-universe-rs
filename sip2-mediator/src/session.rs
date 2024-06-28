@@ -1,4 +1,5 @@
 use super::conf;
+use eg::osrf::logging;
 use eg::EgEvent;
 use eg::EgResult;
 use eg::EgValue;
@@ -167,6 +168,8 @@ impl Session {
     ///
     /// Blocks waiting for a response.
     fn osrf_round_trip(&mut self, msg: sip2::Message) -> EgResult<sip2::Message> {
+        logging::Logger::mk_log_trace();
+
         let msg_json = msg.to_json_value();
 
         log::debug!("{self} posting message: {msg_json}");
